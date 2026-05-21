@@ -1,0 +1,95 @@
+name: Deploy to staging
+
+on:
+  pull_request:
+    types: [labeled]
+
+env:
+  IMAGE_REGISTRY_URL: ghcr.io
+  ###############################################
+  ### Replace <username> with GitHub username ###
+  ###############################################
+  DOCKER_IMAGE_NAME: dyandel-dev-azure-ttt
+  AZURE_WEBAPP_NAME: github-actions
+  ###############################################
+
+jobs:
+  build:
+    if: contains(github.event.pull_request.labels.*.name, 'stage')
+
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 16
+      - name: npm install and build webpack
+        run: |
+          npm install
+          npm run build
+      - uses: actions/upload-artifact@v4
+        with:
+          name: webpack artifacts
+          path: public/
+
+  Build-Docker-Image:
+    runs-on: ubuntu-latest
+    needs: build
+    name: Build image and store in GitHub Container Registry
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Download built artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: webpack artifacts
+          path: public
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.IMAGE_REGISTRY_URL }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.CR_PAT }}
+
+      - name: Extract metadata (tags, labels) for Docker
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{env.IMAGE_REGISTRY_URL}}/${{ github.repository }}/${{env.DOCKER_IMAGE_NAME}}
+          tags: |
+            type=sha,format=long,prefix=
+
+      - name: Build and push Docker image
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+  
+  Deploy-to-Azure:
+    runs-on: ubuntu-latest
+    needs: Build-Docker-Image
+    name: Deploy app container to Azure
+    steps:
+      # If you need the repo checked out for any reason
+      - uses: actions/checkout@v4
+  
+      # Usually NOT required in the deploy job if the image is already built/pushed
+      # Keep this only if you are doing something here that needs registry auth.
+      # Otherwise you can remove this docker-login step.
+      - uses: azure/docker-login@v1
+        with:
+          login-server: ${{ env.IMAGE_REGISTRY_URL }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.CR_PAT }}
+  
+      - name: Deploy web app container (Publish Profile)
+        uses: azure/webapps-deploy@v3
+        with:
+          app-name: ${{ env.AZURE_WEBAPP_NAME }}
+          publish-profile: ${{ secrets.AZURE_WEBAPP_PUBLISH_PROFILE }}
+          images: ${{ env.IMAGE_REGISTRY_URL }}/${{ github.repository }}/${{ env.DOCKER_IMAGE_NAME }}:${{ github.sha }}
